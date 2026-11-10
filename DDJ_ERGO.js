@@ -797,3 +797,77 @@ DDJErgo.shutdown = function() {
         DDJErgo._stopBlinkPad(i);
     }
 };
+
+// ── JOG WHEEL ────────────────────────────────────────────────────────────────
+// MIDI (per deck, kanal n = deck-1):
+//   Note 0x36  touch top (vinyl ON)        -> scratch
+//   Note 0x37  touch top (vinyl OFF)       -> ignorert
+//   Note 0x67  touch top + SHIFT           -> ignorert (seek via CC 0x27)
+//   CC   0x21  ring/kant                   -> pitch bend (nudge)
+//   CC   0x22  topp (vinyl ON)             -> scratch når touch, ellers bend
+//   CC   0x23  topp (vinyl OFF)            -> pitch bend
+//   CC   0x27  topp + SHIFT                -> søk i sporet
+// Verdier er relative: 64 = stillstand, >64 med klokka, <64 mot klokka.
+
+DDJErgo.jogConfig = {
+    intervalsPerRev: 720,      // ticks per omdreining (juster hvis scratch går for fort/sakte)
+    rpm: 33 + 1 / 3,
+    alpha: 1.0 / 8,
+    beta: (1.0 / 8) / 32,
+    bendScale: 0.5,            // nudge-styrke når sporet spiller (var 0.8)
+    pausedJogScale: 0.8,       // jog-styrke når sporet står stille
+    seekSecondsPerTick: 0.05,  // shift + vri: sekunder per tick
+    maxDelta: 40               // forkast støyverdier (f.eks. sporadisk 127)
+};
+
+DDJErgo._jogDelta = function(value) {
+    var d = value - 0x40;
+    if (Math.abs(d) > DDJErgo.jogConfig.maxDelta) return 0;
+    return d;
+};
+
+DDJErgo._jogDeckNum = function(group) {
+    return DDJErgo._deckIdx(group) + 1;
+};
+
+DDJErgo.jogTouch = function(channel, control, value, status, group) {
+    var deck = DDJErgo._jogDeckNum(group);
+    var c = DDJErgo.jogConfig;
+    if (value > 0) {
+        engine.scratchEnable(deck, c.intervalsPerRev, c.rpm, c.alpha, c.beta);
+    } else {
+        engine.scratchDisable(deck, true);   // ramp tilbake til normal fart
+    }
+};
+
+// Topp med vinyl på: scratch når berørt, ellers (f.eks. utrulling) bend
+DDJErgo.jogTopVinyl = function(channel, control, value, status, group) {
+    var d = DDJErgo._jogDelta(value);
+    if (d === 0) return;
+    var deck = DDJErgo._jogDeckNum(group);
+    if (engine.isScratching(deck)) {
+        engine.scratchTick(deck, d);
+    } else {
+        engine.setValue(group, 'jog', d * DDJErgo.jogConfig.bendScale);
+    }
+};
+
+// Ring, og topp med vinyl av: pitch bend / nudge (flytter også posisjon når pauset)
+DDJErgo.jogBend = function(channel, control, value, status, group) {
+    var d = DDJErgo._jogDelta(value);
+    if (d === 0) return;
+    var c = DDJErgo.jogConfig;
+    var scale = engine.getValue(group, 'play') ? c.bendScale : c.pausedJogScale;
+    engine.setValue(group, 'jog', d * scale);
+};
+
+// Shift + topp: rask søking i sporet
+DDJErgo.jogSeek = function(channel, control, value, status, group) {
+    var d = DDJErgo._jogDelta(value);
+    if (d === 0) return;
+    var duration = engine.getValue(group, 'duration');
+    if (!duration) return;
+    var pos = engine.getValue(group, 'playposition') +
+              (d * DDJErgo.jogConfig.seekSecondsPerTick) / duration;
+    engine.setValue(group, 'playposition', Math.max(0, Math.min(1, pos)));
+};
